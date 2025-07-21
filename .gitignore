@@ -1,0 +1,6 @@
+*.log
+.vscode/
+__pycache__/
+poetry.lock
+logs/
+dist/
