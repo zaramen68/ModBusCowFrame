@@ -1,6 +1,12 @@
 
 import sys
 import time
+import signal
+import threading
+from threading import Thread
+import queue
+from queue import Queue
+
 import pymodbus.client as modbusClient
 from pymodbus import ModbusException, FramerType
 from serial import SerialException
@@ -10,31 +16,34 @@ import bitarray
 from bitarray.util import  ba2int
 
 from cow_modbus.logger import logger
+from cow_modbus.protocol.frame_message import Message
 
 MAX_CONNECT = 4
 
-""" Структура сообщения от рамки, заполняется при каждом опросе рамки"""
-@dataclass
-class Message:
-    """Время *20 ms прошедшее с последнего срабатывания метки fdx. макимальное значение 255"""
-    fdx_time: int | None = None
-    """id fdx метки"""
-    fdx_id: int | None = None
-    """rssi fdx метки"""
-    fdx_rssi: int | None = None
-    """Время *20 ms прошедшее с последнего срабатывания метки hdx. макимальное значение 255"""
-    hdx_time: int | None = None
-    """id hdx метки"""
-    hdx_id: int | None = None
-    """rssi hdx метки"""
-    hdx_rssi: int | None = None
-    """Состояние ответа. Если ошибка -  false"""
-    is_valid: bool = False
-    """Текст последней ошибки"""
-    last_error: str | None = None
+# """ Структура сообщения от рамки, заполняется при каждом опросе рамки"""
+# @dataclass
+# class Message:
+#     """Время *20 ms прошедшее с последнего срабатывания метки fdx. макимальное значение 255"""
+#     fdx_time: int | None = None
+#     """id fdx метки"""
+#     fdx_id: int | None = None
+#     """rssi fdx метки"""
+#     fdx_rssi: int | None = None
+#     """Время *20 ms прошедшее с последнего срабатывания метки hdx. макимальное значение 255"""
+#     hdx_time: int | None = None
+#     """id hdx метки"""
+#     hdx_id: int | None = None
+#     """rssi hdx метки"""
+#     hdx_rssi: int | None = None
+#     """Состояние ответа. Если ошибка -  false"""
+#     is_valid: bool = False
+#     """Текст последней ошибки"""
+#     last_error: str | None = None
+#     """ Время создания сообщения """
+#     time_stamp: float
 
-
-class ModbusClient:
+class ModbusClient(Thread):
+    
     client: modbusClient.ModbusBaseSyncClient | None = None
     message: Message
     connection_type: str
@@ -49,10 +58,12 @@ class ModbusClient:
     timeout: int 
     status: bool
     reconnect_num: int
+    messages: Queue
 
 
-    def __init__(self, connection_type, 
-                 host="127.0.0.1", 
+    def __init__(self, connection_type: str,
+                 m_queue: Queue, 
+                 host: str ="127.0.0.1", 
                  framer=FramerType.RTU, 
                  port="COM6", 
                  slave=2, 
@@ -61,7 +72,10 @@ class ModbusClient:
                  bytesize=8, 
                  stopbits=1, 
                  timeout=5) -> None:
+        
+        Thread.__init__(self)
         self.connection_type = connection_type
+        self.messages = m_queue
         self.framer = framer
         self.host = host
         self.port = port
@@ -118,6 +132,11 @@ class ModbusClient:
             logger.error(ex)
             self.message = Message(is_valid=False, last_error=ex)
             print(ex)
+
+        signal.signal(signal.SIGTERM, self.exit_handler)
+        if sys.platform == "linux" or sys.platform == "linux2":
+            signal.signal(signal.SIGQUIT, self.exit_handler)
+        signal.signal(signal.SIGINT, self.exit_handler)
 
     def __del__(self) -> None:
         self.client.close()
@@ -189,10 +208,16 @@ class ModbusClient:
 
                 self.message = Message(fdx_time=fdx_time_20ms, fdx_id=fdx_id, fdx_rssi=fdx_rssi, 
                                        hdx_time=hdx_time_20ms, hdx_id=hdx_id, hdx_rssi=hdx_rssi,
-                                       is_valid=True)
+                                       is_valid=True, time_stamp=time.time())
+                try:
+                    self.messages.put(self.message, timeout=1)
+                except queue.Full as full_ex:
+                    self.messages.queue.clear()
+                    logger.info(" =========== clear queue =============")
+                    logger.error(full_ex)
                 
-                logger.info(f' fdx: time = {fdx_time_20ms}; id = {fdx_id}; rssi = {fdx_rssi}')
-                logger.info(f' hdx: time = {hdx_time_20ms}; id = {hdx_id}; rssi = {hdx_rssi}')
+                # logger.info(f' fdx: time = {fdx_time_20ms}; id = {fdx_id}; rssi = {fdx_rssi}')
+                # logger.info(f' hdx: time = {hdx_time_20ms}; id = {hdx_id}; rssi = {hdx_rssi}')
 
             except SerialException as ex:
                 self.status = False
@@ -208,5 +233,10 @@ class ModbusClient:
             time.sleep(0.5)
 
         sys.exit(-1)
+
+    def exit_handler(self, sig, frame):
+        logger.info('signal({}) received!'.format(sig))
+        self.client.close()
+        sys.exit(0)
             
                 
